@@ -143,8 +143,10 @@ def main():
     errors, skipped, processed, total_parts = [], 0, 0, 0
 
     ctx = mp.get_context("spawn")
-    with ctx.Pool(processes=args.workers) as pool:
-        for r in tqdm(pool.imap_unordered(_process_one, todo_tasks), total=len(todo_tasks)):
+    # maxtasksperchild recycles each worker after N assets, releasing coacd/trimesh
+    # C++ memory that would otherwise accumulate indefinitely.
+    with ctx.Pool(processes=args.workers, maxtasksperchild=10) as pool:
+        for r in tqdm(pool.imap_unordered(_process_one, todo_tasks, chunksize=1), total=len(todo_tasks)):
             if r["error"]:
                 errors.append((r["path"], r["error"]))
             else:
