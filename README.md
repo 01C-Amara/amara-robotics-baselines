@@ -5,7 +5,7 @@ Physics stability and grasping benchmarks for robotics object datasets.
 Two independent simulation backends are supported — pick one or both:
 
 | Backend | Simulator | Physics engine | Python |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | ManiSkill / SAPIEN | SAPIEN 3 | PhysX 5 | 3.10 |
 | Habitat-sim | Bullet | Bullet 3 | 3.9 |
 
@@ -18,8 +18,8 @@ Two independent simulation backends are supported — pick one or both:
 ## Getting started
 
 1. **[Data setup](docs/data_setup.md)** — download, extract, filter, and generate configs for each dataset
-2. **[ManiSkill / SAPIEN backend](docs/maniskill.md)** — installation and usage (recommended)
-3. **[Habitat-sim / Bullet backend](docs/habitat.md)** — installation and usage
+2. **[Habitat-sim / Bullet backend](docs/habitat.md)** — installation and usage (recommended)
+3. **[ManiSkill / SAPIEN backend](docs/maniskill.md)** — installation and usage
 
 ## Results inspector
 
@@ -36,6 +36,10 @@ python -m amara_robotics_baselines.scripts.serve_inspector
 ## Metrics reference
 
 See [docs/metrics.md](docs/metrics.md) for a full description of all CSV output columns.
+
+## License
+
+[CC BY 4.0](LICENSE) — Attribution 4.0 International.
 
 ## Citation
 
