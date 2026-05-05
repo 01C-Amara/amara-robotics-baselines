@@ -44,7 +44,19 @@ python -m amara_robotics_baselines.scripts.filter_assets \
 
 Assets are classified into `manipulation` (< 0.5 m), `obstacle` (0.5–2.0 m), and `excluded`.
 
-### 4. Generate object config files
+### 4. Fix collision mesh scale
+
+The collision GLBs in the raw download are normalized to ~1 m and do not carry the
+real-world scale that is baked into the render GLBs. This script copies the scale node
+from each render GLB into its corresponding collision GLB in-place.
+**Skipping this step causes Habitat-sim physics alignment assertions.**
+
+```bash
+python -m amara_robotics_baselines.scripts.fix_collision_glb_scale \
+  --extracted-dir data/datasets/amara-spatial-10k/extracted
+```
+
+### 5. Generate object config files
 
 ```bash
 python -m amara_robotics_baselines.scripts.generate_object_configs \
@@ -53,7 +65,7 @@ python -m amara_robotics_baselines.scripts.generate_object_configs \
   --out-dir       data/datasets/amara-spatial-10k/configs
 ```
 
-### 5. Generate VHACD collision meshes (optional)
+### 6. Generate VHACD collision meshes (optional)
 
 Required only for `--collision-mode vhacd` or `--collision-mode all`.
 
@@ -70,7 +82,7 @@ Output `.vhacd.glb` files are written alongside the existing meshes in `extracte
 
 ### Final layout
 
-```
+```text
 data/datasets/amara-spatial-10k/
   extracted/                  *.glb, *.vhacd.glb
   metadata/

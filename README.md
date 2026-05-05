@@ -44,10 +44,13 @@ See [docs/metrics.md](docs/metrics.md) for a full description of all CSV output 
 ## Citation
 
 ```bibtex
-@misc{amara-robotics-baselines,
-  title  = {amara-robotics-baselines},
-  author = {TODO},
-  year   = {2025},
-  url    = {TODO}
+@misc{salehi2026amaraspatial10kspatiallysemanticallyaligned,
+      title={AmaraSpatial-10K: A Spatially and Semantically Aligned 3D Dataset for Spatial Computing and Embodied AI}, 
+      author={Mohammad Sadegh Salehi and Alex Perkins and Igor Maurell and Ashkan Dabbagh and Raymond Wong},
+      year={2026},
+      eprint={2604.23018},
+      archivePrefix={arXiv},
+      primaryClass={cs.CV},
+      url={https://arxiv.org/abs/2604.23018}, 
 }
 ```
