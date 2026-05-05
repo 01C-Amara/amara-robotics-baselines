@@ -42,6 +42,12 @@ def _worker_init(config_dir, save_images, modes, out_dir, timeout_s, camera_dist
     _config_dir  = config_dir
     _timeout_s   = timeout_s
     _camera_dist = camera_dist
+    if save_images:
+        import sapien.render as _sr
+        _sr.set_camera_shader_dir("rt")
+        _sr.set_ray_tracing_samples_per_pixel(64)
+        _sr.set_ray_tracing_path_depth(8)
+        _sr.set_ray_tracing_denoiser("none")
     _scene       = make_scene(with_renderer=save_images)
     _images_dirs = {}
     for mode in modes:
