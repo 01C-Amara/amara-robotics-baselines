@@ -706,6 +706,168 @@ def _compute_torso_pose(base_x: float, base_y: float, base_yaw: float,
     return sapien.Pose(p=torso_pos.tolist(), q=q)
 
 
+def _save_all_candidates_html(path, mesh, cand_list, settled_t, R_z, R_orient,
+                               rejected_candidates=None):
+    """Save one HTML showing selected and rejected antipodal candidate pairs.
+
+    Selected pairs are each shown in a distinct color.
+    Rejected pairs are shown as a single togglable group (hidden by default).
+    """
+    try:
+        import plotly.graph_objects as go
+    except ImportError:
+        raise ImportError("plotly is required for HTML saving: pip install plotly")
+
+    R_world = R_z.T @ R_orient
+    verts_world = (R_world @ np.array(mesh.vertices).T).T + settled_t
+    faces = np.array(mesh.faces, dtype=int)
+
+    COLORS = [
+        "#e6194b","#3cb44b","#4363d8","#f58231","#911eb4",
+        "#42d4f4","#f032e6","#bfef45","#fabed4","#469990",
+        "#dcbeff","#9A6324","#800000","#aaffc3","#808000",
+        "#ffd8b1","#000075","#a9a9a9","#e6beff","#fffac8",
+    ]
+
+    traces = []
+    traces.append(go.Mesh3d(
+        x=verts_world[:, 0], y=verts_world[:, 1], z=verts_world[:, 2],
+        i=faces[:, 0], j=faces[:, 1], k=faces[:, 2],
+        color='lightblue', opacity=0.3, name='Object mesh',
+        legendgroup='mesh', showlegend=True,
+    ))
+
+    axis_len = 0.04
+    for idx, (cand, M_a, x_a, z_a) in enumerate(cand_list):
+        color = COLORS[idx % len(COLORS)]
+        p1_local, p2_local = np.array(cand[1]), np.array(cand[2])
+        if np.linalg.norm(p1_local) < 1e-6 and np.linalg.norm(p2_local) < 1e-6:
+            continue
+        p1_w = settled_t + R_world @ p1_local
+        p2_w = settled_t + R_world @ p2_local
+        M_w  = (p1_w + p2_w) / 2
+        grp  = f"selected_{idx:02d}"
+        traces.append(go.Scatter3d(
+            x=[p1_w[0], p2_w[0]], y=[p1_w[1], p2_w[1]], z=[p1_w[2], p2_w[2]],
+            mode='lines+markers',
+            line=dict(color=color, width=3),
+            marker=dict(size=6, color=color),
+            name=f"cand {idx:02d}",
+            legendgroup=grp, legendgrouptitle=dict(text=f"cand {idx:02d}"),
+            showlegend=True,
+        ))
+        tip = M_w + z_a * axis_len
+        traces.append(go.Scatter3d(
+            x=[M_w[0], tip[0]], y=[M_w[1], tip[1]], z=[M_w[2], tip[2]],
+            mode='lines', line=dict(color=color, width=2, dash='dash'),
+            legendgroup=grp, showlegend=False,
+        ))
+
+    if rejected_candidates:
+        first_rejected = True
+        for raw_cand in rejected_candidates:
+            _, p1_local, p2_local, _ = raw_cand
+            p1_local = R_orient @ np.array(p1_local)
+            p2_local = R_orient @ np.array(p2_local)
+            p1_w = settled_t + R_z.T @ p1_local
+            p2_w = settled_t + R_z.T @ p2_local
+            traces.append(go.Scatter3d(
+                x=[p1_w[0], p2_w[0]], y=[p1_w[1], p2_w[1]], z=[p1_w[2], p2_w[2]],
+                mode='lines+markers',
+                line=dict(color='gray', width=1),
+                marker=dict(size=3, color='gray'),
+                name='rejected' if first_rejected else None,
+                legendgroup='rejected',
+                legendgrouptitle=dict(text='Rejected') if first_rejected else None,
+                showlegend=first_rejected,
+                visible='legendonly',
+            ))
+            first_rejected = False
+
+    fig = go.Figure(data=traces)
+    fig.update_layout(
+        scene=dict(xaxis_title='X', yaxis_title='Y', zaxis_title='Z', aspectmode='data'),
+        title=os.path.basename(path),
+        margin=dict(l=0, r=0, t=40, b=0),
+        legend=dict(groupclick='toggleitem'),
+    )
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    fig.write_html(path, include_plotlyjs='cdn')
+
+
+def _save_grasp_html_gpu(path, mesh, p1_local, p2_local,
+                         world_M, x_grip_world, z_grip_world,
+                         wp_grasp, wp_pregrasp, settled_t, R_z, R_orient):
+    """Save an interactive Plotly HTML showing the grasp geometry for a GPU trial."""
+    try:
+        import plotly.graph_objects as go
+    except ImportError:
+        raise ImportError("plotly is required for HTML saving: pip install plotly")
+
+    # Full object world rotation: first apply up-axis orient, then -theta_z (= R_z.T)
+    R_world = R_z.T @ R_orient
+
+    p1_w = settled_t + R_world @ np.array(p1_local)
+    p2_w = settled_t + R_world @ np.array(p2_local)
+
+    verts = np.array(mesh.vertices)
+    verts_world = (R_world @ verts.T).T + settled_t
+    faces = np.array(mesh.faces, dtype=int)
+
+    traces = []
+    traces.append(go.Mesh3d(
+        x=verts_world[:, 0], y=verts_world[:, 1], z=verts_world[:, 2],
+        i=faces[:, 0], j=faces[:, 1], k=faces[:, 2],
+        color='lightblue', opacity=0.4, name='Object mesh', showlegend=True,
+    ))
+    hw = 0.3
+    tx, ty, tz = float(settled_t[0]), float(settled_t[1]), float(verts_world[:, 2].min())
+    tv = np.array([[tx-hw, ty-hw, tz], [tx+hw, ty-hw, tz],
+                   [tx+hw, ty+hw, tz], [tx-hw, ty+hw, tz]])
+    traces.append(go.Mesh3d(
+        x=tv[:, 0], y=tv[:, 1], z=tv[:, 2],
+        i=[0, 0], j=[1, 2], k=[2, 3],
+        color='tan', opacity=0.3, name='Table top', showlegend=True,
+    ))
+    traces.append(go.Scatter3d(x=[p1_w[0]], y=[p1_w[1]], z=[p1_w[2]],
+        mode='markers', marker=dict(size=8, color='red'), name='p1', showlegend=True))
+    traces.append(go.Scatter3d(x=[p2_w[0]], y=[p2_w[1]], z=[p2_w[2]],
+        mode='markers', marker=dict(size=8, color='darkred'), name='p2', showlegend=True))
+    traces.append(go.Scatter3d(
+        x=[p1_w[0], p2_w[0]], y=[p1_w[1], p2_w[1]], z=[p1_w[2], p2_w[2]],
+        mode='lines', line=dict(color='red', width=3), name='squeeze axis', showlegend=True))
+    traces.append(go.Scatter3d(x=[world_M[0]], y=[world_M[1]], z=[world_M[2]],
+        mode='markers', marker=dict(size=10, color='gold'), name='M (midpoint)', showlegend=True))
+    axis_len = 0.06
+    for aname, avec, acolor in [('x_grip', x_grip_world, 'firebrick'),
+                                  ('z_grip (approach)', z_grip_world, 'royalblue')]:
+        tip = world_M + avec * axis_len
+        traces.append(go.Scatter3d(
+            x=[world_M[0], tip[0]], y=[world_M[1], tip[1]], z=[world_M[2], tip[2]],
+            mode='lines+markers', line=dict(color=acolor, width=4),
+            marker=dict(size=[0, 6], color=acolor), name=aname, showlegend=True))
+    traces.append(go.Scatter3d(x=[wp_grasp[0]], y=[wp_grasp[1]], z=[wp_grasp[2]],
+        mode='markers', marker=dict(size=10, color='purple', symbol='circle'),
+        name='EE grasp target', showlegend=True))
+    traces.append(go.Scatter3d(x=[wp_pregrasp[0]], y=[wp_pregrasp[1]], z=[wp_pregrasp[2]],
+        mode='markers', marker=dict(size=10, color='orange', symbol='circle-open'),
+        name='EE pregrasp', showlegend=True))
+    traces.append(go.Scatter3d(
+        x=[wp_pregrasp[0], wp_grasp[0]], y=[wp_pregrasp[1], wp_grasp[1]],
+        z=[wp_pregrasp[2], wp_grasp[2]],
+        mode='lines', line=dict(color='purple', width=2, dash='dash'),
+        name='approach', showlegend=True))
+
+    fig = go.Figure(data=traces)
+    fig.update_layout(
+        scene=dict(xaxis_title='X', yaxis_title='Y', zaxis_title='Z', aspectmode='data'),
+        title=os.path.basename(path),
+        margin=dict(l=0, r=0, t=40, b=0),
+    )
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    fig.write_html(path, include_plotlyjs='cdn')
+
+
 def _run_physics_trial_gpu(
     config_json_path: str,
     collision_mode: str,
@@ -716,6 +878,7 @@ def _run_physics_trial_gpu(
     hi,
     capture: bool = False,
     ray_tracing: bool = False,
+    save_html_path: Optional[str] = None,
 ) -> dict:
     """GPU-physics grasp trial: creates a fresh GPU scene, runs real physics grasping.
 
@@ -805,39 +968,57 @@ def _run_physics_trial_gpu(
     BASE_X   = float(settled_t[0]) + APPROACH_DIST * math.sin(0.0)
     BASE_Y   = float(settled_t[1]) + APPROACH_DIST * math.cos(0.0)
     BASE_YAW = float(math.atan2(settled_t[1] - BASE_Y, settled_t[0] - BASE_X))
-    # Top-down: EE (gripper_link) must be GRIPPER_FINGER_REACH above the object top
-    # EE targets top face of object, shifted to max-Y edge (robot side)
+
+    # ── Candidate-based grasp target ─────────────────────────────────────────
+    # M is the antipodal midpoint in mesh-local space (already rotated by R_orient
+    # in run_snap_gpu before being passed in). world_M is its world position after
+    # adding the settled object translation.
+    # z_grip is the grasp approach axis (up direction of grasp frame, ~world +Z for
+    # top-down, but tilted for side/angled grasps). The EE clearance is applied along
+    # this axis so the arm approaches from the correct direction regardless of orientation.
+    _, x_grip_world, y_grip_world, z_grip_world = _grasp_frame_zup(
+        settled_t + R_z @ np.array(cand[1]),
+        settled_t + R_z @ np.array(cand[2]),
+    ) if (np.linalg.norm(np.array(cand[1])) > 1e-6 and
+          np.linalg.norm(np.array(cand[2])) > 1e-6) else (
+        world_M, np.array([1.0,0,0]), np.array([0,1.0,0]), np.array([0,0,1.0]))
+
     px.sync_poses_gpu_to_cpu()
-    aabb      = rb.get_global_aabb_fast()   # shape [2,3]: [min_xyz, max_xyz]
-    top_z     = float(aabb[1, 2])           # max Z = object top face
-    # GRIPPER_FINGER_REACH = finger joint offset from gripper_link (URDF: xyz="0.16645 0 0")
-    # In top-down mode gripper X-axis points down, so fingers are GRIPPER_FINGER_REACH below EE.
-    # EE at top_z + GRIPPER_FINGER_REACH → fingertips land exactly at top_z.
-    grasp_z   = top_z + GRIPPER_Z_OFFSET
-    grasp_y   = float(aabb[1, 1])  # max world-Y = robot-facing edge of object
-    wp_grasp    = np.array([settled_t[0], grasp_y, grasp_z])
-    wp_pregrasp = np.array([settled_t[0], grasp_y, grasp_z + 0.25])
+    aabb = rb.get_global_aabb_fast()   # shape [2,3]: [min_xyz, max_xyz]
+
+    # Grasp target: candidate midpoint, with EE clearance along approach axis.
+    # For degenerate (fallback) candidates M==0: use AABB top-center instead.
+    if np.linalg.norm(world_M - settled_t) < 1e-4:
+        top_z    = float(aabb[1, 2])
+        world_M  = np.array([settled_t[0], settled_t[1], top_z])
+        z_grip_world = np.array([0.0, 0.0, 1.0])
+
+    wp_grasp    = world_M + z_grip_world * GRIPPER_Z_OFFSET
+    wp_pregrasp = world_M + z_grip_world * 0.25
     print(f"[targets] settled=({settled_t[0]:.3f},{settled_t[1]:.3f},{settled_t[2]:.3f}) "
-          f"aabb_y=[{aabb[0,1]:.3f},{aabb[1,1]:.3f}] aabb_z=[{aabb[0,2]:.3f},{aabb[1,2]:.3f}] "
+          f"aabb_z=[{aabb[0,2]:.3f},{aabb[1,2]:.3f}] "
+          f"world_M=({world_M[0]:.3f},{world_M[1]:.3f},{world_M[2]:.3f}) "
           f"wp_grasp=({wp_grasp[0]:.3f},{wp_grasp[1]:.3f},{wp_grasp[2]:.3f}) "
           f"BASE_Y={BASE_Y:.3f}")
 
-    # Top-down orientation: gripper X-axis points down (-Z in torso frame).
-    # Y-axis (finger direction) is theta_z rotated into torso frame by -BASE_YAW.
-    # Columns: [X_gripper, Y_gripper, Z_gripper] in torso frame.
-    # X=[0,0,-1], Y=[cos(θ-yaw), sin(θ-yaw), 0], Z=X×Y=[sin(θ-yaw), -cos(θ-yaw), 0]
-    def _R_topdown(base_yaw):
-        phi = theta_z - base_yaw
-        cp, sp = math.cos(phi), math.sin(phi)
-        return np.array([[0,  cp, sp],
-                         [0,  sp, -cp],
-                         [-1, 0,  0 ]], dtype=np.float64)
+    # Gripper orientation: X-axis (approach) = -z_grip_world, Y-axis = x_grip_world (squeeze).
+    # Build rotation matrix columns [X_gripper, Y_gripper, Z_gripper] in torso frame.
+    def _R_grasp(base_yaw):
+        t_pose = _compute_torso_pose(BASE_X, BASE_Y, base_yaw, 0.0)
+        R_torso_inv = np.array(t_pose.inv().to_transformation_matrix()[:3, :3])
+        x_col = R_torso_inv @ (-z_grip_world)          # gripper approach axis
+        y_col = R_torso_inv @ x_grip_world             # finger squeeze axis
+        z_col = np.cross(x_col, y_col)
+        z_col /= max(np.linalg.norm(z_col), 1e-9)
+        y_col = np.cross(z_col, x_col)
+        y_col /= max(np.linalg.norm(y_col), 1e-9)
+        return np.column_stack([x_col, y_col, z_col])
 
     def _solve_at_torso_gpu(target_world, torso_height, seed=None):
         t_pose = _compute_torso_pose(BASE_X, BASE_Y, BASE_YAW, torso_height)
         return _solve_ik(chain, ik_solver, lo, hi,
                          _world_to_torso(t_pose, target_world),
-                         rot=_R_topdown(BASE_YAW), seed=seed), t_pose
+                         rot=_R_grasp(BASE_YAW), seed=seed), t_pose
 
     # ── IK: find best torso height for grasp first, then solve pregrasp at same torso ──
     # Torso is set to best_torso before arm moves; pregrasp and grasp share that height.
@@ -866,21 +1047,21 @@ def _run_physics_trial_gpu(
         a = _solve_ik(chain, ik_solver, lo, hi,
                       _world_to_torso(_compute_torso_pose(BASE_X, BASE_Y, BASE_YAW, th),
                                       wp_pregrasp),
-                      rot=_R_topdown(BASE_YAW), seed=angles_grasp)
+                      rot=_R_grasp(BASE_YAW), seed=angles_grasp)
         if a is not None:
             angles_pre     = a
             best_torso_pre = th
             break
     if angles_pre is None:
-        print(f"[WARN] pregrasp IK failed for all torso heights — using ARM_INIT fallback")
-        angles_pre     = ARM_INIT.copy()
+        print(f"[WARN] pregrasp IK failed for all torso heights — using grasp angles fallback")
+        angles_pre     = angles_grasp.copy()
         best_torso_pre = best_torso
     angles_pre = _unwrap_to_reference(angles_pre, angles_grasp)
 
     torso_raise  = min(LIFT_HEIGHT, TORSO_MAX - best_torso)
     arm_lift_rem = LIFT_HEIGHT - torso_raise
     lift_torso   = best_torso + torso_raise
-    wp_lifted    = wp_grasp + np.array([0.0, 0.0, arm_lift_rem])
+    wp_lifted    = wp_grasp + np.array([0.0, 0.0, arm_lift_rem])  # always lift along world Z
     angles_lifted = angles_grasp.copy()
     if arm_lift_rem > 0.01:
         a, _ = _solve_at_torso_gpu(wp_lifted, lift_torso, seed=angles_grasp)
@@ -1023,6 +1204,40 @@ def _run_physics_trial_gpu(
     # ── Success: object was lifted and then released ───────────────────────────
     success    = obj_z_rise >= LIFT_THRESHOLD
 
+    if save_html_path is not None:
+        try:
+            cfg_html = _json_mod.loads(Path(config_json_path).read_text())
+            config_dir_html = Path(config_json_path).parent
+            coll_path_html = str((config_dir_html / cfg_html["collision_asset"]).resolve())
+            if collision_mode == "vhacd":
+                vhacd_html = coll_path_html.replace(".glb", ".vhacd.glb")
+                if os.path.exists(vhacd_html):
+                    coll_path_html = vhacd_html
+            elif collision_mode == "raw":
+                coll_path_html = str((config_dir_html / cfg_html["render_asset"]).resolve())
+            mesh_html = _load_glb_mesh(coll_path_html)
+            up_vec_html = np.array(cfg_html.get("up", [0.0, 0.0, 1.0]), dtype=float)
+            up_vec_html /= np.linalg.norm(up_vec_html)
+            if np.allclose(up_vec_html, np.array([0.0, 0.0, 1.0])):
+                R_orient_html = np.eye(3)
+            else:
+                from scipy.spatial.transform import Rotation as _R2
+                rot_o, _ = _R2.align_vectors([[0, 0, 1]], [up_vec_html])
+                R_orient_html = rot_o.as_matrix()
+            cand_orig = cand  # (score, p1_local, p2_local, width)
+            _save_grasp_html_gpu(
+                save_html_path, mesh_html,
+                cand_orig[1], cand_orig[2],
+                world_M, x_grip_world, z_grip_world,
+                wp_grasp, wp_pregrasp,
+                settled_t, R_z, R_orient_html,
+            )
+        except Exception as _he:
+            import traceback; traceback.print_exc()
+            print(f"[html] failed: {_he}")
+        else:
+            print(f"[html] saved: {save_html_path}")
+
     if cam_entity is not None:
         try:
             scene.remove_entity(cam_entity)
@@ -1041,6 +1256,8 @@ def run_snap_gpu(
     save_dir: Optional[str] = None,
     asset_id: Optional[str] = None,
     ray_tracing: bool = False,
+    save_all_gifs: bool = False,
+    save_html: bool = False,
 ) -> dict:
     """GPU-physics snap-based graspability check.
 
@@ -1082,11 +1299,28 @@ def run_snap_gpu(
             rot_orient, _ = _Rotation.align_vectors([world_up], [up_vec])
             R_orient = rot_orient.as_matrix()
 
-        # Single deterministic top-down candidate: fingers along world +X.
-        M_fallback = np.zeros(3)
-        fallback   = (1.0, M_fallback, M_fallback, 0.04)
-        x_ang      = np.array([1.0, 0.0, 0.0])
-        cand_list  = [(fallback, M_fallback, x_ang, M_fallback)]
+        # ── Sample antipodal candidates from collision mesh ───────────────────
+        mesh = None
+        try:
+            loaded = _load_glb_mesh(collision_path)
+            mesh = loaded
+            candidates, _, _ = _sample_candidates(mesh, n_samples=500)
+        except Exception:
+            candidates = []
+
+        if not candidates:
+            M_fallback = np.zeros(3)
+            fallback   = (1.0, M_fallback, M_fallback, 0.04)
+            x_ang      = np.array([1.0, 0.0, 0.0])
+            cand_list  = [(fallback, M_fallback, x_ang, M_fallback)]
+        else:
+            cand_list = []
+            for c in candidates[:GRASP_CANDIDATES]:
+                _, p1, p2, _ = c
+                p1_w = R_orient @ np.array(p1)
+                p2_w = R_orient @ np.array(p2)
+                M_a, x_a, y_a, z_a = _grasp_frame_zup(p1_w, p2_w)
+                cand_list.append((c, np.array(M_a), x_a, z_a))
 
         chain, ik_solver, lo, hi = _make_ik_solver(MS_FETCH_URDF_ARM_IK)
 
@@ -1097,13 +1331,24 @@ def run_snap_gpu(
         n_trials    = len(cand_list)
         do_capture  = save_dir is not None and asset_id is not None
 
-        for cand_tuple in cand_list:
+        for trial_idx, cand_tuple in enumerate(cand_list):
+            html_path = None
+            if save_html and asset_id is not None:
+                asset_dir = os.path.join(save_dir, asset_id) if save_dir else asset_id
+                os.makedirs(asset_dir, exist_ok=True)
+                html_path = os.path.join(asset_dir, f"cand{trial_idx:02d}.html")
             r = _run_physics_trial_gpu(
                 config_json_path, collision_mode, cand_tuple,
                 chain, ik_solver, lo, hi,
                 capture=do_capture,
                 ray_tracing=ray_tracing,
+                save_html_path=html_path,
             )
+            if save_all_gifs and do_capture and r.get("frames"):
+                os.makedirs(os.path.join(save_dir, asset_id), exist_ok=True)
+                _save_gif(r["frames"],
+                          os.path.join(save_dir, asset_id,
+                                       f"cand{trial_idx:02d}.gif"))
             all_results.append(r)
             if r["success"]:
                 successes += 1
@@ -1117,6 +1362,23 @@ def run_snap_gpu(
             if best.get("frames"):
                 os.makedirs(save_dir, exist_ok=True)
                 _save_gif(best["frames"], os.path.join(save_dir, f"{asset_id}.gif"))
+
+        if save_html and mesh is not None and asset_id is not None:
+            asset_dir = os.path.join(save_dir, asset_id) if save_dir else asset_id
+            os.makedirs(asset_dir, exist_ok=True)
+            overview_path = os.path.join(asset_dir, "candidates_overview.html")
+            try:
+                _save_all_candidates_html(
+                    overview_path, mesh, cand_list,
+                    settled_t=np.zeros(3),
+                    R_z=np.eye(3),
+                    R_orient=R_orient,
+                    rejected_candidates=candidates[GRASP_CANDIDATES:] if candidates else None,
+                )
+                print(f"[html] overview saved: {overview_path}")
+            except Exception as _he:
+                import traceback; traceback.print_exc()
+                print(f"[html] overview failed: {_he}")
 
         result["grasp_successes"]    = successes
         result["grasp_trials"]       = n_trials

@@ -2,6 +2,10 @@
 
 Physics stability and grasping benchmarks for robotics object datasets.
 
+<!-- Replace the path below with the actual GIF once generated:
+     e.g. docs/assets/grasp_demo.gif or a direct URL -->
+![Robot grasping demo](docs/assets/grasp_demo.gif)
+
 Two independent simulation backends are supported — pick one or both:
 
 | Backend | Simulator | Physics engine | Python |

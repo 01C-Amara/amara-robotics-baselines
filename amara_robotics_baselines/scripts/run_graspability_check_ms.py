@@ -171,6 +171,10 @@ def main():
     parser.add_argument("--use-gpu",        action="store_true",
                         help="Use GPU physics (run_snap_gpu); each trial creates its own scene")
     parser.add_argument("--save-images",    action="store_true")
+    parser.add_argument("--save-all-gifs",  action="store_true",
+                        help="(GPU) Save a GIF for every candidate trial, not just the best")
+    parser.add_argument("--save-html",      action="store_true",
+                        help="(GPU) Save an interactive Plotly HTML for each candidate trial")
     parser.add_argument("--ray-tracing",    action="store_true",
                         help="Enable ray tracing for saved images (slower but photorealistic)")
     parser.add_argument("--limit",          type=int, default=None)
@@ -239,8 +243,8 @@ def main():
               f"(modes: {modes})...")
         images_dirs = {}
         for mode in modes:
-            if args.save_images:
-                d = grasp_dir / "images" / mode
+            d = grasp_dir / "images" / mode
+            if args.save_images or args.save_html or args.save_all_gifs:
                 d.mkdir(parents=True, exist_ok=True)
                 images_dirs[mode] = str(d)
             else:
@@ -264,6 +268,8 @@ def main():
                             cfg_path, collision_mode=mode,
                             save_dir=images_dirs[mode], asset_id=asset_id,
                             ray_tracing=args.ray_tracing,
+                            save_all_gifs=args.save_all_gifs,
+                            save_html=args.save_html,
                         )
                         writer.writerow({"asset_id": asset_id, **result})
                     except Exception as e:
