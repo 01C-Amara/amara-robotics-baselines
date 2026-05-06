@@ -7,6 +7,8 @@ import multiprocessing as mp
 import os
 from pathlib import Path
 
+GRASP_MAX_DIM = 0.20   # only test graspability on objects ≤ 20 cm
+
 import pandas as pd
 from tqdm import tqdm
 
@@ -14,6 +16,7 @@ from amara_robotics_baselines.checks import graspability_check_ms
 from amara_robotics_baselines.checks.graspability_check_ms import (
     MS_FETCH_URDF_BUNDLED,
     MS_FETCH_URDF_ARM_IK,
+    run_snap_gpu,
 )
 from amara_robotics_baselines.utils.maniskill_factory import make_scene, setup_robot_drives
 
@@ -41,7 +44,7 @@ _config_dir  = None
 _timeout_s   = None
 
 
-def _worker_init(config_dir, save_images, modes, out_dir, timeout_s):
+def _worker_init(config_dir, save_images, ray_tracing, modes, out_dir, timeout_s):
     global _scene, _robot, _chain, _ik_solver, _lo, _hi
     global _modes, _images_dirs, _config_dir, _timeout_s
 
@@ -50,10 +53,18 @@ def _worker_init(config_dir, save_images, modes, out_dir, timeout_s):
     _timeout_s  = timeout_s
 
     import sapien
+    if save_images and ray_tracing:
+        import sapien.render as _sr
+        _sr.set_camera_shader_dir("rt")
+        _sr.set_ray_tracing_samples_per_pixel(64)
+        _sr.set_ray_tracing_path_depth(8)
+        _sr.set_ray_tracing_denoiser("none")
     _scene = make_scene(with_renderer=save_images)
     loader = _scene.create_urdf_loader()
     loader.fix_root_link = True
     _robot = loader.load(MS_FETCH_URDF_BUNDLED)
+    for link in _robot.get_links():
+        link.disable_gravity = True
     setup_robot_drives(_robot)
 
     _chain, _ik_solver, _lo, _hi = graspability_check_ms._make_ik_solver(MS_FETCH_URDF_ARM_IK)
@@ -100,8 +111,8 @@ class _PoolDead(Exception):
 
 
 def _run_batch(asset_ids_batch, init_args, workers, csv_file, writer, progress):
-    timeout_s = init_args[4]
-    modes     = init_args[2]
+    timeout_s = init_args[5]
+    modes     = init_args[3]
     ctx  = mp.get_context("spawn")
     pool = ctx.Pool(processes=workers, initializer=_worker_init, initargs=init_args)
     try:
@@ -155,14 +166,26 @@ def main():
         description="Run snap-based graspability check (ManiSkill/SAPIEN) on assets")
     parser.add_argument("--config-dir",     required=True, type=Path)
     parser.add_argument("--out-dir",        required=True, type=Path)
-    parser.add_argument("--collision-mode", choices=["convex_hull", "vhacd", "both"],
+    parser.add_argument("--collision-mode", choices=["convex_hull", "vhacd", "raw", "both", "all"],
                         default="convex_hull")
+    parser.add_argument("--use-gpu",        action="store_true",
+                        help="Use GPU physics (run_snap_gpu); each trial creates its own scene")
     parser.add_argument("--save-images",    action="store_true")
+    parser.add_argument("--save-all-gifs",  action="store_true",
+                        help="(GPU) Save a GIF for every candidate trial, not just the best")
+    parser.add_argument("--save-html",      action="store_true",
+                        help="(GPU) Save an interactive Plotly HTML for each candidate trial")
+    parser.add_argument("--ray-tracing",    action="store_true",
+                        help="Enable ray tracing for saved images (slower but photorealistic)")
     parser.add_argument("--limit",          type=int, default=None)
     parser.add_argument("--workers",        type=int, default=1)
     parser.add_argument("--batch-size",     type=int, default=50)
     parser.add_argument("--timeout",        type=int, default=120)
     parser.add_argument("--resume",         action="store_true")
+    parser.add_argument("--manifest",       type=Path, default=None,
+                        help="filtered_manifest.parquet — used to filter by max_dim ≤ GRASP_MAX_DIM")
+    parser.add_argument("--max-dim",        type=float, default=GRASP_MAX_DIM,
+                        help=f"Maximum object dimension for graspability (default: {GRASP_MAX_DIM} m)")
     args = parser.parse_args()
 
     grasp_dir = args.out_dir / "graspability"
@@ -173,10 +196,30 @@ def main():
         raise FileNotFoundError(f"No .object_config.json files in {args.config_dir}")
 
     asset_ids = [c.stem.replace(".object_config", "") for c in configs]
-    if args.limit:
-        asset_ids = asset_ids[:args.limit]
 
-    modes    = ["convex_hull", "vhacd"] if args.collision_mode == "both" else [args.collision_mode]
+    # Filter by size using manifest if provided
+    if args.manifest and args.manifest.exists():
+        mf = pd.read_parquet(args.manifest)
+        if "max_dim" in mf.columns:
+            small = set(mf[mf["max_dim"] <= args.max_dim]["asset_id"])
+            before = len(asset_ids)
+            asset_ids = [a for a in asset_ids if a in small]
+            print(f"Size filter (max_dim ≤ {args.max_dim} m): {before} → {len(asset_ids)} assets")
+        else:
+            print("Warning: manifest has no max_dim column — skipping size filter")
+    else:
+        print(f"No manifest provided — running on all {len(asset_ids)} assets (no size filter)")
+
+    if args.limit is not None:
+        asset_ids = asset_ids[:args.limit]
+        print(f"(--limit {args.limit}: testing first {len(asset_ids)} assets)")
+
+    if args.collision_mode == "all":
+        modes = ["convex_hull", "vhacd", "raw"]
+    elif args.collision_mode == "both":
+        modes = ["convex_hull", "vhacd"]
+    else:
+        modes = [args.collision_mode]
     csv_path = grasp_dir / "graspability_results.csv"
 
     done: set = set()
@@ -193,32 +236,72 @@ def main():
         print("Nothing to do.")
         return
 
-    print(f"Running graspability check [ManiSkill/SAPIEN] on {len(asset_ids)} assets "
-          f"(modes: {modes}, workers: {args.workers})...")
-
-    init_args = (
-        str(args.config_dir), args.save_images,
-        modes, str(grasp_dir), args.timeout,
-    )
-
     open_mode = "a" if args.resume else "w"
-    batches = [asset_ids[i:i + args.batch_size]
-               for i in range(0, len(asset_ids), args.batch_size)]
 
-    with open(csv_path, open_mode, newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=FIELDNAMES, extrasaction="ignore")
-        if write_header:
-            writer.writeheader()
+    if args.use_gpu:
+        print(f"Running graspability check [GPU/top-down] on {len(asset_ids)} assets "
+              f"(modes: {modes})...")
+        images_dirs = {}
+        for mode in modes:
+            d = grasp_dir / "images" / mode
+            if args.save_images or args.save_html or args.save_all_gifs:
+                d.mkdir(parents=True, exist_ok=True)
+                images_dirs[mode] = str(d)
+            else:
+                images_dirs[mode] = None
 
-        overall = tqdm(total=len(asset_ids), desc="assets")
-        for batch_idx, batch in enumerate(batches):
-            tqdm.write(f"Batch {batch_idx + 1}/{len(batches)} ({len(batch)} assets)...")
-            try:
-                _run_batch(batch, init_args, args.workers, f, writer, overall)
-            except Exception as e:
-                tqdm.write(f"  Batch {batch_idx + 1} crashed: {e} — continuing")
-                f.flush()
-        overall.close()
+        with open(csv_path, open_mode, newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=FIELDNAMES, extrasaction="ignore")
+            if write_header:
+                writer.writeheader()
+
+            for asset_id in tqdm(asset_ids, desc="assets"):
+                cfg_path = str(args.config_dir / f"{asset_id}.object_config.json")
+                if not Path(cfg_path).exists():
+                    for mode in modes:
+                        writer.writerow({"asset_id": asset_id, "collision_mode": mode,
+                                         "error": "config not found"})
+                    continue
+                for mode in modes:
+                    try:
+                        result = run_snap_gpu(
+                            cfg_path, collision_mode=mode,
+                            save_dir=images_dirs[mode], asset_id=asset_id,
+                            ray_tracing=args.ray_tracing,
+                            save_all_gifs=args.save_all_gifs,
+                            save_html=args.save_html,
+                        )
+                        writer.writerow({"asset_id": asset_id, **result})
+                    except Exception as e:
+                        writer.writerow({"asset_id": asset_id, "collision_mode": mode,
+                                         "error": str(e)})
+                    f.flush()
+    else:
+        print(f"Running graspability check [ManiSkill/SAPIEN] on {len(asset_ids)} assets "
+              f"(modes: {modes}, workers: {args.workers})...")
+
+        init_args = (
+            str(args.config_dir), args.save_images, args.ray_tracing,
+            modes, str(grasp_dir), args.timeout,
+        )
+
+        batches = [asset_ids[i:i + args.batch_size]
+                   for i in range(0, len(asset_ids), args.batch_size)]
+
+        with open(csv_path, open_mode, newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=FIELDNAMES, extrasaction="ignore")
+            if write_header:
+                writer.writeheader()
+
+            overall = tqdm(total=len(asset_ids), desc="assets")
+            for batch_idx, batch in enumerate(batches):
+                tqdm.write(f"Batch {batch_idx + 1}/{len(batches)} ({len(batch)} assets)...")
+                try:
+                    _run_batch(batch, init_args, args.workers, f, writer, overall)
+                except Exception as e:
+                    tqdm.write(f"  Batch {batch_idx + 1} crashed: {e} — continuing")
+                    f.flush()
+            overall.close()
 
     df = pd.read_csv(csv_path)
     for mode in modes:
